@@ -1,0 +1,509 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+<title>Survive — Mini 10 Minutes Till Dawn Prototype</title>
+<style>
+  :root{--bg:#0b0f14;--ui:#e6edf3;--danger:#ff6b6b;--accent:#7be4ff}
+  html,body{height:100%;margin:0;background:linear-gradient(180deg,#071018 0%, #091722 100%);color:var(--ui);font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial}
+  canvas{display:block;width:100%;height:100vh;touch-action:none}
+  #ui{position:fixed;left:12px;top:12px;z-index:10}
+  .stat{background:rgba(0,0,0,0.25);padding:8px 12px;border-radius:8px;margin-bottom:8px;font-weight:600}
+  #message{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,0.6);padding:20px;border-radius:10px; text-align:center; display:none}
+  button{background:var(--accent);border:none;color:#022;padding:10px 14px;border-radius:8px;font-weight:700;cursor:pointer}
+  /* simple mobile joystick */
+  #joy{position:fixed;left:18px;bottom:18px;width:120px;height:120px;border-radius:50%;background:rgba(255,255,255,0.03);display:none;touch-action:none}
+  #joystick{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:46px;height:46px;border-radius:50%;background:rgba(255,255,255,0.08)}
+  @media (pointer:coarse){ #joy{display:block} }
+  #hint{position:fixed;right:12px;top:12px;background:rgba(0,0,0,0.25);padding:8px 12px;border-radius:8px}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="ui">
+  <div class="stat" id="time">Time: 10:00</div>
+  <div class="stat" id="hp">HP: 100</div>
+  <div class="stat" id="score">Score: 0</div>
+</div>
+<div id="hint">WASD / arrows to move • Click / tap to shoot</div>
+<div id="message">
+  <div id="msg-text" style="font-size:20px;margin-bottom:12px"></div>
+  <div id="msg-sub" style="opacity:.9;margin-bottom:14px"></div>
+  <button id="restart">Play Again</button>
+</div>
+
+<!-- Mobile joystick -->
+<div id="joy"><div id="joystick"></div></div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  let W = canvas.width = innerWidth;
+  let H = canvas.height = innerHeight;
+
+  // UI
+  const timeEl = document.getElementById('time');
+  const hpEl = document.getElementById('hp');
+  const scoreEl = document.getElementById('score');
+  const message = document.getElementById('message');
+  const msgText = document.getElementById('msg-text');
+  const msgSub = document.getElementById('msg-sub');
+  const restartBtn = document.getElementById('restart');
+
+  // Game settings
+  const TARGET_SECONDS = 600; // 10 minutes = 600s
+  let timeLeft = TARGET_SECONDS;
+  let lastTime = performance.now();
+  let accumulator = 0;
+  let running = true;
+
+  // Player
+  const player = {
+    x: W/2, y: H/2,
+    r: 14,
+    speed: 260, // px/sec
+    hp: 100,
+    maxHp: 100,
+    fireCooldown: 0.16,
+    fireTimer: 0,
+    score: 0
+  };
+
+  // Input
+  const input = { up:false,down:false,left:false,right:false,shoot:false,mouseX:W/2,mouseY:H/2 };
+  addEventListener('keydown', e => {
+    if(e.key==='w'||e.key==='ArrowUp') input.up = true;
+    if(e.key==='s'||e.key==='ArrowDown') input.down = true;
+    if(e.key==='a'||e.key==='ArrowLeft') input.left = true;
+    if(e.key==='d'||e.key==='ArrowRight') input.right = true;
+    if(e.key===' '){ input.shoot = true }
+  });
+  addEventListener('keyup', e => {
+    if(e.key==='w'||e.key==='ArrowUp') input.up = false;
+    if(e.key==='s'||e.key==='ArrowDown') input.down = false;
+    if(e.key==='a'||e.key==='ArrowLeft') input.left = false;
+    if(e.key==='d'||e.key==='ArrowRight') input.right = false;
+    if(e.key===' ') input.shoot = false;
+  });
+
+  // Mouse
+  canvas.addEventListener('mousemove', e => {
+    const rect = canvas.getBoundingClientRect();
+    input.mouseX = (e.clientX - rect.left) * (canvas.width / rect.width);
+    input.mouseY = (e.clientY - rect.top) * (canvas.height / rect.height);
+  });
+  canvas.addEventListener('mousedown', e => { input.shoot = true });
+  window.addEventListener('mouseup', e => { input.shoot = false });
+
+  // Touch: tap to shoot
+  canvas.addEventListener('touchstart', e => {
+    e.preventDefault();
+    input.shoot = true;
+    const t = e.touches[0];
+    const rect = canvas.getBoundingClientRect();
+    input.mouseX = (t.clientX - rect.left) * (canvas.width / rect.width);
+    input.mouseY = (t.clientY - rect.top) * (canvas.height / rect.height);
+  }, { passive: false });
+  canvas.addEventListener('touchmove', e => {
+    const t = e.touches[0];
+    const rect = canvas.getBoundingClientRect();
+    input.mouseX = (t.clientX - rect.left) * (canvas.width / rect.width);
+    input.mouseY = (t.clientY - rect.top) * (canvas.height / rect.height);
+  }, { passive: false });
+  window.addEventListener('touchend', e => { input.shoot = false });
+
+  // Mobile joystick for coarse pointers
+  const joy = document.getElementById('joy');
+  const joystick = document.getElementById('joystick');
+  let joyActive = false;
+  let joyCenter = {x:0,y:0};
+  function setupJoy() {
+    const rect = joy.getBoundingClientRect();
+    joyCenter = { x: rect.left + rect.width/2, y: rect.top + rect.height/2 };
+  }
+  setupJoy();
+  window.addEventListener('resize', setupJoy);
+
+  joy.addEventListener('touchstart', e => {
+    joyActive = true;
+    moveJoy(e.touches[0]);
+  }, { passive:false });
+  joy.addEventListener('touchmove', e => {
+    moveJoy(e.touches[0]);
+  }, { passive:false });
+  joy.addEventListener('touchend', e => {
+    joyActive = false;
+    joystick.style.transform = 'translate(-50%,-50%)';
+    input.up = input.down = input.left = input.right = false;
+  });
+
+  function moveJoy(touch) {
+    const rect = joy.getBoundingClientRect();
+    const cx = rect.left + rect.width/2;
+    const cy = rect.top + rect.height/2;
+    const dx = touch.clientX - cx;
+    const dy = touch.clientY - cy;
+    const max = rect.width/2 - 10;
+    const dist = Math.min(max, Math.hypot(dx,dy));
+    const ang = Math.atan2(dy,dx);
+    const nx = Math.cos(ang) * dist;
+    const ny = Math.sin(ang) * dist;
+    joystick.style.transform = `translate(calc(-50% + ${nx}px), calc(-50% + ${ny}px))`;
+    // set directional booleans
+    input.left = dx < -10 && Math.abs(dx) > Math.abs(dy);
+    input.right = dx > 10 && Math.abs(dx) > Math.abs(dy);
+    input.up = dy < -10 && Math.abs(dy) > Math.abs(dx);
+    input.down = dy > 10 && Math.abs(dy) > Math.abs(dx);
+  }
+
+  // Entities
+  const bullets = [];
+  const enemies = [];
+  const pickups = [];
+
+  // Helpers
+  function rand(min,max){ return Math.random()*(max-min)+min }
+  function clamp(v,a,b){ return Math.max(a,Math.min(b,v)); }
+
+  // Spawning
+  let spawnTimer = 0;
+  let spawnInterval = 1.2; // seconds between spawns (decreases over time)
+  function spawnEnemy() {
+    // spawn from edges
+    const side = Math.floor(rand(0,4));
+    let x,y;
+    if(side===0){ x = rand(-40, W+40); y = -30 } // top
+    if(side===1){ x = rand(-40, W+40); y = H+30 } // bottom
+    if(side===2){ x = -30; y = rand(-40, H+40) } // left
+    if(side===3){ x = W+30; y = rand(-40, H+40) } // right
+    const difficulty = 1 + Math.min(8, (TARGET_SECONDS - timeLeft)/100); // increases gradually
+    const speed = rand(40, 70) + difficulty*10;
+    const hp = Math.round(8 + difficulty*3 + Math.random()*10);
+    enemies.push({ x,y, r: 12 + Math.random()*10, speed, hp, maxHp:hp, color: `hsl(${rand(0,360)},60%,55%)` });
+  }
+
+  // Pickups
+  function spawnPickup(x,y) {
+    const type = Math.random() < 0.6 ? 'hp' : 'rapid';
+    pickups.push({ x,y, r:10, type, life: 12 });
+  }
+
+  // Game loop
+  function step(dt) {
+    if(!running) return;
+    // time
+    timeLeft -= dt;
+    if(timeLeft <= 0){
+      timeLeft = 0;
+      win();
+      return;
+    }
+
+    // adjust spawn rate slowly
+    spawnInterval = Math.max(0.25, 1.2 - ( (TARGET_SECONDS - timeLeft) / TARGET_SECONDS ) * 0.9);
+
+    // spawn
+    spawnTimer -= dt;
+    if(spawnTimer <= 0){
+      spawnTimer = spawnInterval;
+      // spawn 1-3 enemies, slightly randomized
+      const num = Math.random() < 0.15 ? 2 : 1;
+      for(let i=0;i<num;i++) spawnEnemy();
+    }
+
+    // movement
+    let dx = 0, dy = 0;
+    if(input.up) dy -= 1;
+    if(input.down) dy += 1;
+    if(input.left) dx -= 1;
+    if(input.right) dx += 1;
+    // normalize
+    if(dx!==0 || dy!==0){
+      const len = Math.hypot(dx,dy) || 1;
+      dx = dx/len;
+      dy = dy/len;
+      player.x += dx * player.speed * dt;
+      player.y += dy * player.speed * dt;
+    }
+
+    // clamp player inside
+    player.x = clamp(player.x, player.r+6, W-player.r-6);
+    player.y = clamp(player.y, player.r+6, H-player.r-6);
+
+    // shooting
+    player.fireTimer -= dt;
+    if(input.shoot && player.fireTimer <= 0){
+      player.fireTimer = player.fireCooldown;
+      shootBullet();
+    }
+
+    // bullets move
+    for(let i=bullets.length-1;i>=0;i--){
+      const b = bullets[i];
+      b.x += b.vx*dt;
+      b.y += b.vy*dt;
+      b.life -= dt;
+      if(b.life <= 0 || b.x < -50 || b.x > W+50 || b.y < -50 || b.y > H+50) bullets.splice(i,1);
+    }
+
+    // enemies move towards player
+    for(let i=enemies.length-1;i>=0;i--){
+      const e = enemies[i];
+      const ang = Math.atan2(player.y - e.y, player.x - e.x);
+      e.x += Math.cos(ang)*e.speed*dt;
+      e.y += Math.sin(ang)*e.speed*dt;
+
+      // collision with player
+      const dist = Math.hypot(e.x - player.x, e.y - player.y);
+      if(dist < e.r + player.r){
+        // enemy deals damage and bounces a bit; player gets hurt
+        player.hp -= 8 + Math.floor(e.maxHp/4);
+        // knock enemy back
+        const repulse = 30;
+        e.x -= Math.cos(ang)*repulse;
+        e.y -= Math.sin(ang)*repulse;
+        // push a small chance to drop pickup
+        if(Math.random() < 0.08) spawnPickup(e.x, e.y);
+      }
+
+      // check bullets hitting enemy
+      for(let j=bullets.length-1;j>=0;j--){
+        const b = bullets[j];
+        const d2 = Math.hypot(e.x - b.x, e.y - b.y);
+        if(d2 < e.r + b.r){
+          e.hp -= b.damage;
+          bullets.splice(j,1);
+          if(e.hp <= 0){
+            // enemy dead
+            player.score += Math.round(10 + e.maxHp);
+            // chance to spawn pickup
+            if(Math.random() < 0.2) spawnPickup(e.x, e.y);
+            enemies.splice(i,1);
+            break;
+          }
+        }
+      }
+    }
+
+    // pickups
+    for(let i=pickups.length-1;i>=0;i--){
+      const p = pickups[i];
+      p.life -= dt;
+      if(p.life <= 0) { pickups.splice(i,1); continue; }
+      const d = Math.hypot(player.x - p.x, player.y - p.y);
+      if(d < player.r + p.r + 6){
+        // collect
+        if(p.type === 'hp'){
+          player.hp = Math.min(player.maxHp, player.hp + 25);
+        } else if(p.type === 'rapid'){
+          // temporary fire rate buff
+          player.fireCooldown = Math.max(0.05, player.fireCooldown * 0.55);
+          setTimeout(()=> { player.fireCooldown = Math.min(0.16, player.fireCooldown / 0.55) }, 7000);
+        }
+        pickups.splice(i,1);
+      }
+    }
+
+    // player death
+    if(player.hp <= 0){
+      player.hp = 0;
+      lose();
+      return;
+    }
+
+    // UI updates
+    timeEl.textContent = 'Time: ' + formatTime(timeLeft);
+    hpEl.textContent = 'HP: ' + Math.round(player.hp);
+    scoreEl.textContent = 'Score: ' + player.score;
+  }
+
+  // shooting
+  function shootBullet() {
+    const ang = Math.atan2(input.mouseY - player.y, input.mouseX - player.x);
+    const speed = 720;
+    bullets.push({
+      x: player.x + Math.cos(ang)*(player.r+6),
+      y: player.y + Math.sin(ang)*(player.r+6),
+      vx: Math.cos(ang)*speed,
+      vy: Math.sin(ang)*speed,
+      r: 4,
+      damage: 10,
+      life: 1.6
+    });
+    // small recoil visually (and slight knockback)
+    player.x -= Math.cos(ang)*2;
+    player.y -= Math.sin(ang)*2;
+  }
+
+  // drawing
+  function draw() {
+    // clear
+    ctx.fillStyle = '#061018';
+    ctx.fillRect(0,0,W,H);
+
+    // simple background grid
+    ctx.strokeStyle = 'rgba(255,255,255,0.02)';
+    ctx.lineWidth = 1;
+    const grid = 60;
+    ctx.beginPath();
+    for(let x=0;x<W;x+=grid){ ctx.moveTo(x,0); ctx.lineTo(x,H) }
+    for(let y=0;y<H;y+=grid){ ctx.moveTo(0,y); ctx.lineTo(W,y) }
+    ctx.stroke();
+
+    // pickups
+    for(const p of pickups){
+      ctx.save();
+      ctx.translate(p.x,p.y);
+      if(p.type === 'hp'){
+        ctx.fillStyle = 'rgba(120,220,120,0.95)';
+        roundedRect(ctx, -p.r, -p.r, p.r*2, p.r*2, 4);
+        ctx.fill();
+        ctx.fillStyle = '#073';
+        ctx.font = 'bold 12px sans-serif';
+        ctx.textAlign = 'center'; ctx.textBaseline='middle';
+        ctx.fillText('+', 0, 0);
+      } else {
+        ctx.fillStyle = 'rgba(123,228,255,0.95)';
+        ctx.beginPath(); ctx.arc(0,0,p.r,0,Math.PI*2); ctx.fill();
+        ctx.fillStyle = '#023'; ctx.font='bold 11px sans-serif'; ctx.fillText('R',0,0);
+      }
+      ctx.restore();
+    }
+
+    // bullets
+    for(const b of bullets){
+      ctx.fillStyle = '#fff';
+      ctx.beginPath(); ctx.arc(b.x,b.y,b.r,0,Math.PI*2); ctx.fill();
+    }
+
+    // enemies
+    for(const e of enemies){
+      ctx.save();
+      ctx.translate(e.x,e.y);
+      // body
+      const t = Math.max(0, e.hp / e.maxHp);
+      ctx.fillStyle = e.color;
+      ctx.beginPath(); ctx.arc(0,0,e.r,0,Math.PI*2); ctx.fill();
+      // hp bar
+      ctx.fillStyle = 'rgba(0,0,0,0.5)';
+      roundedRect(ctx, -e.r, -e.r-8, e.r*2, 5, 3);
+      ctx.fillStyle = `linear-gradient(90deg, #ffb3b3, #ff6b6b)`;
+      ctx.fillStyle = `rgba(20,20,20,0.2)`;
+      ctx.fill();
+      ctx.fillStyle = `rgba(0,0,0,0.0)`;
+      // colored hp
+      ctx.fillStyle = `rgba(255,120,120,0.9)`;
+      const w = (e.r*2-2) * t;
+      ctx.fillRect(-e.r+1, -e.r-7, w, 3);
+      ctx.restore();
+    }
+
+    // player
+    ctx.save();
+    ctx.translate(player.x, player.y);
+    // aim rotation
+    const ang = Math.atan2(input.mouseY - player.y, input.mouseX - player.x);
+    ctx.rotate(ang);
+    // player body
+    ctx.fillStyle = 'linear-gradient(#fff,#ccc)';
+    ctx.beginPath(); ctx.arc(0,0,player.r,0,Math.PI*2); ctx.fillStyle = '#e6edf3'; ctx.fill();
+    // gun
+    ctx.fillStyle = '#022';
+    roundedRect(ctx, player.r-2, -6, 18, 12, 4);
+    ctx.restore();
+
+    // HUD overlay (time bar)
+    const barW = 260;
+    const barH = 12;
+    const bx = (W - barW) / 2;
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    roundedRect(ctx, bx-6, 12, barW+12, barH+12, 8);
+    ctx.fill();
+    ctx.fillStyle = '#293b44';
+    roundedRect(ctx, bx, 18, barW, barH, 6); ctx.fill();
+    const perc = timeLeft / TARGET_SECONDS;
+    ctx.fillStyle = '#7be4ff';
+    roundedRect(ctx, bx, 18, Math.max(2, barW * perc), barH, 6); ctx.fill();
+
+    // on-screen small text
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.font = '12px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(`Survive: ${formatTime(timeLeft)} • Score: ${player.score}`, W/2, 42);
+  }
+
+  function roundedRect(ctx,x,y,w,h,r){
+    ctx.beginPath();
+    ctx.moveTo(x+r,y);
+    ctx.arcTo(x+w,y,x+w,y+h,r);
+    ctx.arcTo(x+w,y+h,x,y+h,r);
+    ctx.arcTo(x,y+h,x,y,r);
+    ctx.arcTo(x,y,x+w,y,r);
+    ctx.closePath();
+  }
+
+  function formatTime(s){
+    s = Math.max(0, Math.round(s));
+    const mm = Math.floor(s/60).toString().padStart(2,'0');
+    const ss = (s%60).toString().padStart(2,'0');
+    return `${mm}:${ss}`;
+  }
+
+  function win(){
+    running = false;
+    msgText.textContent = 'You Survived!';
+    msgSub.textContent = `Score: ${player.score} • Time Reached`;
+    message.style.display = 'block';
+  }
+  function lose(){
+    running = false;
+    msgText.textContent = 'You Died';
+    msgSub.textContent = `Score: ${player.score} • Survived ${formatTime(TARGET_SECONDS - timeLeft)}`;
+    message.style.display = 'block';
+  }
+
+  restartBtn.addEventListener('click', () => {
+    resetGame();
+    message.style.display = 'none';
+  });
+
+  function resetGame(){
+    W = canvas.width = innerWidth;
+    H = canvas.height = innerHeight;
+    player.x = W/2; player.y = H/2; player.hp = player.maxHp; player.score = 0; player.fireCooldown = 0.16; player.fireTimer = 0;
+    bullets.length = enemies.length = pickups.length = 0;
+    timeLeft = TARGET_SECONDS;
+    spawnTimer = 0;
+    running = true;
+    lastTime = performance.now();
+    requestAnimationFrame(loop);
+  }
+
+  // main loop with fixed-ish step smoothing
+  function loop(now){
+    const dt = Math.min(0.05, (now - lastTime)/1000);
+    lastTime = now;
+    step(dt);
+    draw();
+    if(running) requestAnimationFrame(loop);
+  }
+
+  // start
+  resetGame();
+  requestAnimationFrame(loop);
+
+  // window resize
+  addEventListener('resize', () => {
+    W = canvas.width = innerWidth;
+    H = canvas.height = innerHeight;
+  });
+
+  // small tune: spawn a few enemies initially
+  for(let i=0;i<4;i++) spawnEnemy();
+
+})();
+</script>
+</body>
+</html>
